@@ -1,7 +1,7 @@
 import socket # Python's built-in library for socket/network programming.
 import sys # Python's library that provides access to command-line arguments.
-import threading # Python's library that lets multiple sections of program
-# execute concurrently.
+import threading # Python's library that lets multiple sections of program execute concurrently.
+import os # Python's library to obtain file names from directories.
 
 # ------------------------------------------------------------
 # READ THE CONTROL PORT FROM THE COMMAND LINE
@@ -400,6 +400,33 @@ def handle_client(control_connection_socket, client_control_address):
                     sender_response = "200\n\n"
                     data_connection_socket.sendall(sender_response.encode())
 
+            # ----------------------------
+            # LIST COMMAND
+            # ----------------------------
+
+            elif command == "list":
+                if len(command_parts) != 1:
+                    data_connection_socket.sendall("500\n\n".encode())
+                    continue
+
+                files = sorted(filename for filename in os.listdir(".")
+                # (".") means current directory
+                # Show every filename in the current directory
+                # sorted() orders filenames in alphabetic order.
+                               
+                # Check whether the path used leads to an actual file
+                # This avoids sending directories instead of files.
+                if os.path.isfile(filename))
+
+                # Convert the filenames into the required comma-separated format.
+                files_list = ", ".join(files)
+                
+                print(f"List requested by {client_username}. Sending files.")
+
+                # Send the status code and file list through the DATA connection.
+                list_response = f"200\n\n{files_list}"
+                data_connection_socket.sendall(list_response.encode())
+            
             # ----------------------------------------------------
             # QUIT COMMAND
             # ----------------------------------------------------
