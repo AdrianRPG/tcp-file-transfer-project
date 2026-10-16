@@ -434,11 +434,39 @@ def handle_client(control_connection_socket, client_control_address):
     
                 except OSError:
                     data_connection_socket.sendall("500\n\n".encode())
-            
-            
+
             # ----------------------------
+            # RETR COMMAND
+            # ----------------------------
+            elif command == "retr":
+                if len(command_parts) != 2:
+                    data_connection_socket.sendall("500\n\n".encode())
+                    continue
+
+                filename = command_parts[1].strip()
+
+                if filename == "":
+                    data_connection_socket.sendall("500\n\n".encode())
+                    continue
+                    
+                try:
+                    # Open the requested file and read its contents as bytes.
+                    with open(filename, "rb") as file:
+                        file_data = file.read()
+                        
+                    print(f"Retr requested by {client_username}. Sending file: {filename}")
+
+                    retr_response = b"200\n\n" + file_data
+                    data_connection_socket.sendall(retr_response)
+
+                    print("File sent.")
+
+                except OSError:
+                    data_connection_socket.sendall("500\n\n".encode())
+            
+            # --------------------
             # LIST COMMAND
-            # ----------------------------
+            # --------------------
 
             elif command == "list":
                 if len(command_parts) != 1:
