@@ -38,7 +38,7 @@ try:
     # ------------------------------------------------------------
     # Ask the OS to create a TCP socket (networking endpoint).
     # The client will eventually use this control connection to send commands
-    # such as:login, who, broadcast, private, and quit
+    # such as: login, who, broadcast, private, and quit
     control_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # At this point, the control socket does not yet have the
     # client's IP address and a TCP port assigned by the OS.
@@ -96,6 +96,9 @@ try:
     # The server responds through the already-established
     # control TCP connection.
     connect_response_bytes = control_connection_socket.recv(1024)
+
+    if not connect_response_bytes:
+            raise OSError("Server closed the control connection.")
     
     # Convert the received bytes into a Python string.
     connect_response = connect_response_bytes.decode()
@@ -137,8 +140,52 @@ try:
     data_connection_socket.connect((server_ip_address, server_data_port))
 
     # ------------------------------------------------------------
+    # RECEIVE AND PROCESS LOGIN COMMAND
+    # ------------------------------------------------------------
+    while True:
+        # Wait for the user to enter the LOGIN command.
+        user_input = input()
+
+        # Expected format: login <username>
+        login_parts = user_input.split(" ", 1)
+
+        if len(login_parts) != 2:
+            print("Invalid login command.")
+            continue
+
+        command = login_parts[0]
+        username = login_parts[1].strip()
+
+        if command != "login" or username == "":
+            print("Invalid login command.")
+            continue
+
+        # Send the LOGIN command through the CONTROL connection.
+        control_connection_socket.sendall(user_input.encode())
+
+        # Receive the LOGIN response through the DATA connection.
+        login_response_bytes = data_connection_socket.recv(1024)
+
+        if not login_response_bytes:
+            raise OSError("Server closed the data connection.")
+
+        login_response = login_response_bytes.decode()
+
+        # The status code is the first line of the response.
+        status_code = login_response.split("\n", 1)[0].strip()
+
+        if status_code == "200":
+            print("200 status code received. Login successful")
+            break
+
+        # LOGIN failed, so allow the user to try again.
+        print(f"{status_code} status code received.")
+
+    # ------------------------------------------------------------
     # START THE DATA RECEIVER THREAD
     # ------------------------------------------------------------
+    # LOGIN has already completed, so the receiver thread can now
+    # listen for later server messages on the DATA connection.
     receiver_thread = threading.Thread(
         target=receive_server_messages,
         args=(data_connection_socket,),
@@ -146,7 +193,7 @@ try:
     )
 
     receiver_thread.start()
-
+    
     # ------------------------------------------------------------
     # SEND USER COMMANDS
     # ------------------------------------------------------------
