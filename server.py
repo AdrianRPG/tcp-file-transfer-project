@@ -116,7 +116,36 @@ def handle_client(control_connection_socket, client_control_address):
     data_listening_socket = None
 
     try:
+        
+        # ------------------------------------------------------------
+        # RECEIVE AND VALIDATE CONNECT COMMAND
+        # ------------------------------------------------------------
+        # Wait for the client to send the CONNECT command through
+        # the already-established CONTROL connection.
+        connect_request_bytes = control_connection_socket.recv(1024)
 
+        # recv() returning "blank" means the client closed the connection.
+        if not connect_request_bytes:
+            return
+
+        # Convert the received bytes into a string
+        connect_request = connect_request_bytes.decode().strip()
+
+        # Format: connect <ip_address> <control_port>
+        connect_parts = connect_request.split()
+
+        # CONNECT must contain exactly three parts and begin with "connect".
+        if len(connect_parts) != 3 or connect_parts[0] != "connect":
+            control_connection_socket.sendall("500\n\n".encode())
+            return
+
+        # The third argument must be a valid integer TCP port.
+        try:
+            int(connect_parts[2])
+        except ValueError:
+            control_connection_socket.sendall("500\n\n".encode())
+            return
+        
         # ------------------------------------------------------------
         # CREATE THE DATA LISTENING SOCKET
         # ------------------------------------------------------------
