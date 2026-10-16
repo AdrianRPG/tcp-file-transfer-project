@@ -85,32 +85,48 @@ try:
     # ephemeral (random) source TCP port for the connection.
 
     # ------------------------------------------------------------
+    # SEND THE CONNECT COMMAND
+    # ------------------------------------------------------------
+    # Send the validated CONNECT command through the CONTROL connection.
+    control_connection_socket.sendall(user_input.encode())
+
+    # ------------------------------------------------------------
     # RECEIVE THE CONNECT RESPONSE
     # ------------------------------------------------------------
     # The server responds through the already-established
     # control TCP connection.
     connect_response_bytes = control_connection_socket.recv(1024)
+    
     # Convert the received bytes into a Python string.
-
     connect_response = connect_response_bytes.decode()
-    print(connect_response)
 
     # ------------------------------------------------------------
-    # EXTRACT THE SERVER'S DATA PORT
+    # EXTRACT THE STATUS CODE & SERVER'S DATA PORT
     # ------------------------------------------------------------
     # The response format is:
     # Status Code
     #
-    # Data
+    # Data Port
     # Split the string using "\n\n" as the separator but only once.
-    status_code, server_data_port = connect_response.split("\n\n",1)
-    server_data_port = int(server_data_port)
+    status_code, response_data = connect_response.split("\n\n",1)
 
+    # CONNECT must succeed before the DATA connection can be created.
+    if status_code != "200":
+        print(f"{status_code} status code received.")
+        raise ConnectionError("CONNECT request failed.")
+
+    # Convert the DATA port from string to integer.
+    server_data_port = int(response_data.strip())
+
+    # Display the successful CONNECT output
+    print("200 status code received. Starting data connection on port")
+    print(server_data_port)
+    
     # ------------------------------------------------------------
     # CREATE THE CLIENT'S DATA SOCKET
     # ------------------------------------------------------------
     # Ask the OS to create a new IPv4 TCP socket for data connection.
-    # It will be used to receives server responses, broadcasts, private messages, etc.
+    # It will be used to receive server responses, broadcasts, private messages, etc.
     data_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     # ------------------------------------------------------------
