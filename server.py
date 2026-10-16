@@ -400,6 +400,42 @@ def handle_client(control_connection_socket, client_control_address):
                     sender_response = "200\n\n"
                     data_connection_socket.sendall(sender_response.encode())
 
+            # ----------------
+            # STOR COMMAND
+            # ----------------
+            elif command == "stor":
+                if len(command_parts) != 2:
+                    data_connection_socket.sendall("500\n\n".encode())
+                    continue
+
+            filename = command_parts[1].strip()
+
+            if filename == "":
+                data_connection_socket.sendall("500\n\n".encode())
+                    continue
+
+            print(f"Stor {filename} requested by {client_username}")
+
+            try:
+                
+                # Receive the file contents through the DATA connection.
+                file_data = data_connection_socket.recv(4096)
+    
+                # Create the file in the current directory and write the received bytes (data) to it.
+                # open() means open or create the requested file using the name stored in filename.
+                # "wb" means write binary mode, not to limit the range of file types.
+                # We use binary because file_data contains bytes.
+                with open(filename, "wb") as file:
+                    file.write(file_data)
+    
+                print("STOR complete")
+    
+                data_conneciton_socket.sendall("200\n\n".encode())
+
+            except OSError:
+                data_conneciton_socket.sendall("500\n\n".encode())
+            
+            
             # ----------------------------
             # LIST COMMAND
             # ----------------------------
