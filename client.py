@@ -200,6 +200,46 @@ try:
     while True:
         # Wait for the user to enter a command.
         user_input = input()
+
+        # Split the command only once.
+        command_parts = user_input.split(" ", 1)
+        command = command_parts[0]
+
+        # --------------------------------------------------------
+        # STOR COMMAND
+        # --------------------------------------------------------
+        if command == "stor":
+            if len(command_parts) != 2:
+                print("Invalid stor command.")
+                continue
+
+        filename = command_parts[1].strip()
+
+        if filename == "":
+            print("Invalid stor command.")
+            continue
+
+        try:
+            # Open the file to read the contents as bytes.
+            # "rb" means read binary.
+            with open(filename, "rb") as file:
+                file_data = file.read()
+
+        except OSError:
+            print("File not found.")
+            continue
+
+        # Send the STOR command through CONTROL socket
+        control_connection_socket.sendall(user_input.encode())
+
+        # Send contents or data of the file through DATA socket
+        data_connection_socket.sendall(file_data)
+
+        continue
+        
+        # --------------------------------------------------------
+        # ALL OTHER COMMANDS
+        # --------------------------------------------------------
         # Send entire command line through the control connection.
         control_connection_socket.sendall(user_input.encode())
 
