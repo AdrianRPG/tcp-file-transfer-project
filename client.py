@@ -112,6 +112,22 @@ def receive_server_messages(data_connection_socket):
             
                 continue
 
+            if pending_command == "quit": 
+
+                # The status code is the first line of the response.
+                status_code = response_bytes.split(b"\n", 1)[0].decode().strip()
+
+                print(f"{status_code} status code received.")
+
+                # QUIT has finished.
+                pending_command = None
+                pending_filename = None
+
+                # Tell the main thread that the response was processed.
+                command_complete_event.set()
+
+                continue
+
             
             # ------------------------------------------------
             # NORMAL CHAT/SERVER MESSAGE
@@ -435,17 +451,35 @@ try:
             command_complete_event.wait()
         
             continue
-            
+
+        # --------------------------------------------------------
+        # QUIT COMMAND
+        # --------------------------------------------------------
+        if command == "quit":
+            if len(command_parts) != 1:
+                print("Invalid quit command.")
+                continue
+
+            # Tell the receiver thread that the next response belongs to QUIT.
+            pending_command = "quit"
+            pending_filename = None
+
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+
+            # Send QUIT through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+
+            # Wait until the receiver thread processes the server response.
+            command_complete_event.wait()
+
+            break
         
         # --------------------------------------------------------
         # ALL OTHER COMMANDS
         # --------------------------------------------------------
         # Send entire command line through the control connection.
         control_connection_socket.sendall(user_input.encode())
-
-        # command "quit" ends the client's command loop.
-        if user_input.strip() == "quit":
-            break
 
     # ------------------------------------------------------------
     # WAIT FOR THE FINAL SERVER RESPONSE BEFORE ACTUALLY QUITTING
