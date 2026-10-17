@@ -6,6 +6,9 @@ import threading # Python's library that lets multiple sections of program
 # RECEIVE SERVER MESSAGES
 # ------------------------------------------------------------
 def receive_server_messages(data_connection_socket):
+
+    global pending_command, pending_filename
+    
     try:
         while True:
             # Wait for a response/message from the server.
@@ -14,7 +17,31 @@ def receive_server_messages(data_connection_socket):
             # recv() returning b"" means the server closed the data connection.
             if not response_bytes:
                 break
+                
+            # ------------------------------------------------
+            # STOR RESPONSE
+            # ------------------------------------------------
+            if pending_command == "stor":
 
+                status_code = response_bytes.split(b"\n", 1)[0].decode().strip()
+
+                if status_code == "200":
+                    print("200 status code received. File Sent.")
+                else:
+                    print(f"{status_code} status code received.")
+
+                # STOR has finished.
+                pending_command = None
+                pending_filename = None
+
+                # Tell the main thread that the command is complete.
+                command_complete_event.set()
+
+                continue
+
+            # ------------------------------------------------
+            # NORMAL CHAT/SERVER MESSAGE
+            # ------------------------------------------------
             # Convert the received bytes into a string.
             response = response_bytes.decode()
             print(response)
@@ -31,6 +58,13 @@ print("Starting client...")
 control_connection_socket = None
 data_connection_socket = None
 receiver_thread = None
+
+# Tracks which file-transfer command is currently waiting for a DATA response
+pending_command = None
+pending_filename = None
+
+# Allows the receiver thread to signal when the current command is complete
+command_complete_event = threading.Event()
 
 try:
     # ------------------------------------------------------------
@@ -229,11 +263,21 @@ try:
             print("File not found.")
             continue
 
+        # Tell the receiver thread that the next response belongs to STOR.
+        pending_command = "stor"
+        pending_filename = filename
+
+        # Make sure the completion signal starts in the unset state.
+        command_complete_event.clear()
+        
         # Send the STOR command through CONTROL socket
         control_connection_socket.sendall(user_input.encode())
 
         # Send contents or data of the file through DATA socket
         data_connection_socket.sendall(file_data)
+
+        # Wait until the receiver thread processes the server response.
+        command_complete_event.wait()
 
         continue
         
