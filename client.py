@@ -40,6 +40,30 @@ def receive_server_messages(data_connection_socket):
                 continue
 
             # ------------------------------------------------
+            # LIST RESPONSE
+            # ------------------------------------------------
+            if pending_command == "list":
+                # Separate the status code from the returned file list.
+                status_code_bytes, response_data = response_bytes.split(b"\n\n", 1)
+                status_code = status_code_bytes.decode().strip()
+
+            if status_code == "200":
+                files_list = response_data.decode().strip()
+                print(f"200 status code received. Files: {files_list}")
+            else:
+                print(f"{status_code} status code received.")
+
+            # LIST has finished.
+            pending_command = None
+            pending_filename = None
+
+            # Tell the main thread that the command is complete.
+            command_complete_event()
+
+            continue
+                                                                        
+
+            # ------------------------------------------------
             # NORMAL CHAT/SERVER MESSAGE
             # ------------------------------------------------
             # Convert the received bytes into a string.
@@ -277,6 +301,29 @@ try:
         data_connection_socket.sendall(file_data)
 
         # Wait until the receiver thread processes the server response.
+        command_complete_event.wait()
+
+        continue
+
+        # --------------------------------------------------------
+        # LIST COMMAND
+        # --------------------------------------------------------
+        if command == "list":
+            if len(command_parts) != 1:
+                print("Invalid list command.")
+                continue
+
+        # Tell the receiver thread that the next response belongs to LIST command.
+        pending_command = "list"
+        pending_filename = None
+
+        # Reset the completion signal before sending the command.
+        command_complete_event.clear()
+
+        # Send LIST command through the CONTROL connection.
+        control_connection_socket.sendall(user_input.encode())
+
+        # Wait until the receiver thread processes the response.
         command_complete_event.wait()
 
         continue
