@@ -47,22 +47,72 @@ def receive_server_messages(data_connection_socket):
                 status_code_bytes, response_data = response_bytes.split(b"\n\n", 1)
                 status_code = status_code_bytes.decode().strip()
 
-            if status_code == "200":
-                files_list = response_data.decode().strip()
-                print(f"200 status code received. Files: {files_list}")
-            else:
-                print(f"{status_code} status code received.")
+                if status_code == "200":
+                    files_list = response_data.decode().strip()
+                    print(f"200 status code received. Files: {files_list}")
+                else:
+                    print(f"{status_code} status code received.")
 
-            # LIST has finished.
-            pending_command = None
-            pending_filename = None
+                # LIST has finished.
+                pending_command = None
+                pending_filename = None
 
-            # Tell the main thread that the command is complete.
-            command_complete_event()
+                # Tell the main thread that the command is complete.
+                command_complete_event.set()
+    
+                continue
 
-            continue
-                                                                        
+            # ------------------------------------------------
+            # RETR RESPONSE
+            # ------------------------------------------------
+            if pending_command == "retr":
 
+                # Separate the status code from the returned file contents.
+                status_code_bytes, file_data = response_bytes.split(b"\n\n", 1)
+                status_code = status_code_bytes.decode().strip()
+
+                if status_code == "200":
+                    # Create/overwrite the local file using the bytes received from the server.
+                    with open(pending_filename, "wb") as file:
+                        file.write(file_data)
+
+                    print("File retrieved.")
+
+                else:
+                    print(f"{status_code} status code received.")
+
+                # RETR has finished.
+                pending_command = None
+                pending_filename = None
+    
+                # Tell the main thread that RETR is complete.
+                command_complete_event.set()
+    
+                continue
+
+            # ------------------------------------------------
+            # DELE RESPONSE
+            # ------------------------------------------------
+            if pending_command == "dele":
+            
+                # The status code is the first line of the response.
+                status_code = response_bytes.split(b"\n", 1)[0].decode().strip()
+            
+                if status_code == "200":
+                    print("200 status code received. File deleted.")
+                else:
+                    print(f"{status_code} status code received.")
+            
+                # DELE has finished.
+                pending_command = None
+                pending_filename = None
+            
+                # Tell the main thread that the command is complete.
+                command_complete_event.set()
+            
+                continue
+
+            
             # ------------------------------------------------
             # NORMAL CHAT/SERVER MESSAGE
             # ------------------------------------------------
@@ -271,39 +321,39 @@ try:
                 print("Invalid stor command.")
                 continue
 
-        filename = command_parts[1].strip()
+            filename = command_parts[1].strip()
+    
+            if filename == "":
+                print("Invalid stor command.")
+                continue
+    
+            try:
+                # Open the file to read the contents as bytes.
+                # "rb" means read binary.
+                with open(filename, "rb") as file:
+                    file_data = file.read()
+    
+            except OSError:
+                print("File not found.")
+                continue
 
-        if filename == "":
-            print("Invalid stor command.")
+            # Tell the receiver thread that the next response belongs to STOR.
+            pending_command = "stor"
+            pending_filename = filename
+    
+            # Make sure the completion signal starts in the unset state.
+            command_complete_event.clear()
+            
+            # Send the STOR command through CONTROL socket
+            control_connection_socket.sendall(user_input.encode())
+    
+            # Send contents or data of the file through DATA socket
+            data_connection_socket.sendall(file_data)
+    
+            # Wait until the receiver thread processes the server response.
+            command_complete_event.wait()
+    
             continue
-
-        try:
-            # Open the file to read the contents as bytes.
-            # "rb" means read binary.
-            with open(filename, "rb") as file:
-                file_data = file.read()
-
-        except OSError:
-            print("File not found.")
-            continue
-
-        # Tell the receiver thread that the next response belongs to STOR.
-        pending_command = "stor"
-        pending_filename = filename
-
-        # Make sure the completion signal starts in the unset state.
-        command_complete_event.clear()
-        
-        # Send the STOR command through CONTROL socket
-        control_connection_socket.sendall(user_input.encode())
-
-        # Send contents or data of the file through DATA socket
-        data_connection_socket.sendall(file_data)
-
-        # Wait until the receiver thread processes the server response.
-        command_complete_event.wait()
-
-        continue
 
         # --------------------------------------------------------
         # LIST COMMAND
@@ -313,20 +363,79 @@ try:
                 print("Invalid list command.")
                 continue
 
-        # Tell the receiver thread that the next response belongs to LIST command.
-        pending_command = "list"
-        pending_filename = None
+            # Tell the receiver thread that the next response belongs to LIST command.
+            pending_command = "list"
+            pending_filename = None
 
-        # Reset the completion signal before sending the command.
-        command_complete_event.clear()
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+    
+            # Send LIST command through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+    
+            # Wait until the receiver thread processes the response.
+            command_complete_event.wait()
 
-        # Send LIST command through the CONTROL connection.
-        control_connection_socket.sendall(user_input.encode())
+            continue
 
-        # Wait until the receiver thread processes the response.
-        command_complete_event.wait()
+        # --------------------------------------------------------
+        # RETR COMMAND
+        # --------------------------------------------------------
+        if command == "retr":
+            if len(command_parts) != 2:
+                print("Invalid retr command.")
+                continue
 
-        continue
+            filename = command_parts[1].strip()
+
+            if filename == "":
+                print("Invalid retr command.")
+                continue
+
+            # Tell the receiver thread that the next response belongs to RETR
+            pending_command = "retr"
+            pending_filename = filename
+
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+    
+            # Send RETR through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+    
+            # Wait until the receiver thread processes and saves the files.
+            command_complete_event.wait()
+    
+            continue
+
+        # --------------------------------------------------------
+        # DELE COMMAND
+        # --------------------------------------------------------
+        if command == "dele":
+            if len(command_parts) != 2:
+                print("Invalid dele command.")
+                continue
+            
+            filename = command_parts[1].strip()
+            
+            if filename == "":
+                print("Invalid dele command.")
+                continue
+            
+            # Tell the receiver thread that the next response belongs to DELE.
+            pending_command = "dele"
+            pending_filename = filename
+            
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+        
+            # Send DELE through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+        
+            # Wait until the receiver thread processes the server response.
+            command_complete_event.wait()
+        
+            continue
+            
         
         # --------------------------------------------------------
         # ALL OTHER COMMANDS
