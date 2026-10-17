@@ -17,7 +17,98 @@ def receive_server_messages(data_connection_socket):
             # recv() returning b"" means the server closed the data connection.
             if not response_bytes:
                 break
+
+            # ------------------------------------------------
+            # JOIN NOTIFICATION
+            # ------------------------------------------------            
+            if response_bytes.startswith(b"200\n\njoin\n"):
+                # JOIN notifications are required by the server protocol,
+                # but the client output example does not display them.
+                continue
+
+            # ------------------------------------------------
+            # LOGOUT NOTIFICATION
+            # ------------------------------------------------
+            if response_bytes.startswith(b"200\n\nlogout\n"):
+                # LOGOUT notifications are required by the server protocol,
+                # but the client output example does not display them.
+                continue
+
+            # ------------------------------------------------
+            # BROADCAST MESSAGE
+            # ------------------------------------------------
+            if response_bytes.startswith(b"200\n\nBroadcast\n"):
+
+                response = response_bytes.decode()
+
+                response_parts = response.split("\n", 4)
+                sender = response_parts[3]
+                message = response_parts[4]
+
+                print("200 status code received.")
+                print(f"Broadcast message from {sender}: {message}")
+
+                continue
+
+            # ------------------------------------------------
+            # PRIVATE MESSAGE
+            # ------------------------------------------------
+            if response_bytes.startswith(b"200\n\nPrivate\n"):
+
+                # Convert the complete private message into text.
+                response = response_bytes.decode()
                 
+                response_parts = response.split("\n", 4)
+                sender = response_parts[3]
+                message = response_parts[4]
+                print("200 status code received.")
+                print(f"{sender}: {message}")
+
+                continue
+            
+            # ------------------------------------------------
+            # WHO RESPONSE
+            # ------------------------------------------------
+            if pending_command == "who":
+                # Separate the status code from the returned usernames.
+                status_code_bytes, response_data = response_bytes.split(b"\n\n", 1)
+                status_code = status_code_bytes.decode().strip()
+
+                if status_code == "200":
+                    users_list = response_data.decode().strip()
+                    print(f"200 status code received. Users currently connected: {users_list}")
+                else:
+                    print(f"{status_code} status code received.")
+
+                # WHO has finished.
+                pending_command = None
+                pending_filename = None
+
+                # Tell the main thread that the command is complete.
+                command_complete_event.set()
+                continue
+
+            # ------------------------------------------------
+            # PRIVATE SENDER RESPONSE
+            # ------------------------------------------------
+            if pending_command == "private":
+
+                # The sender receives only the status code.
+                status_code = response_bytes.split(b"\n", 1)[0].decode().strip()
+                
+                if status_code == "200":
+                    print("200 status code received. Message sent.")
+                else:
+                    print(f"{status_code} status code received.")
+
+                # PRIVATE has finished.
+                pending_command = None
+                pending_filename = None
+
+                # Tell the main thread that the command is complete.
+                command_complete_event.set()
+                continue
+            
             # ------------------------------------------------
             # STOR RESPONSE
             # ------------------------------------------------
@@ -111,7 +202,10 @@ def receive_server_messages(data_connection_socket):
                 command_complete_event.set()
             
                 continue
-
+            
+            # ------------------------------------------------
+            # QUIT RESPONSE
+            # ------------------------------------------------
             if pending_command == "quit": 
 
                 # The status code is the first line of the response.
@@ -222,7 +316,7 @@ try:
     connect_response_bytes = control_connection_socket.recv(1024)
 
     if not connect_response_bytes:
-            raise OSError("Server closed the control connection.")
+        raise OSError("Server closed the control connection.")
     
     # Convert the received bytes into a Python string.
     connect_response = connect_response_bytes.decode()
@@ -328,6 +422,64 @@ try:
         # Split the command only once.
         command_parts = user_input.split(" ", 1)
         command = command_parts[0]
+
+        # --------------------------------------------------------
+        # WHO COMMAND
+        # --------------------------------------------------------
+        if command == "who":
+            if len(command_parts) != 1:
+                print("Invalid who command.")
+                continue
+
+            # Tell the receiver thread that the next response belongs to WHO.
+            pending_command = "who"
+            pending_filename = None
+
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+
+            # Send WHO through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+
+            # Wait until the receiver thread processes the response.
+            command_complete_event.wait()
+            continue
+
+        # --------------------------------------------------------
+        # PRIVATE COMMAND
+        # --------------------------------------------------------
+        if command == "private":
+            if len(command_parts) != 2:
+                print("Invalid private command.")
+                continue
+
+            # Expected format: private <username> <message>
+            private_parts = command_parts[1].split(" ", 1)
+
+            if len(private_parts) != 2:
+                print("Invalid private command.")
+                continue
+
+            target_username = private_parts[0].strip()
+            message = private_parts[1].strip()
+
+            if target_username == "" or message == "":
+                print("Invalid private command.")
+                continue
+
+            # Tell the receiver thread that the next status response belongs to PRIVATE.
+            pending_command = "private"
+            pending_filename = None
+
+            # Reset the completion signal before sending the command.
+            command_complete_event.clear()
+
+            # Send PRIVATE through the CONTROL connection.
+            control_connection_socket.sendall(user_input.encode())
+
+            # Wait until the receiver thread processes the sender response.
+            command_complete_event.wait()
+            continue
 
         # --------------------------------------------------------
         # STOR COMMAND
