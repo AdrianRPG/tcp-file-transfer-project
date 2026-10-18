@@ -100,7 +100,7 @@ def receive_server_messages(data_connection_socket):
                 continue
 
             # response list
-=            if pending_command == "list":
+            if pending_command == "list":
                 status_code_bytes, response_data = response_bytes.split(b"\n\n", 1)
                 status_code = status_code_bytes.decode().strip()
 
@@ -366,9 +366,9 @@ try:
     
             command_complete_event.clear()
             
-=            control_connection_socket.sendall(user_input.encode())
+            control_connection_socket.sendall(user_input.encode())
     
-=            data_connection_socket.sendall(file_data)
+            data_connection_socket.sendall(file_data)
     
             command_complete_event.wait()
     
