@@ -1,583 +1,365 @@
-import socket # Python's built-in library for socket/network programming.
-import sys # Python's library that provides access to command-line arguments.
-import threading # Python's library that lets multiple sections of program execute concurrently.
-import os # Python's library to obtain file names from directories.
+import os
+import socket
+import sys
+import threading
 
 # ------------------------------------------------------------
-# READ THE CONTROL PORT FROM THE COMMAND LINE
+# Constants
 # ------------------------------------------------------------
-# Check command formatting is good
-if len(sys.argv) != 2:
-    print("Usage: python server.py <control_port>")
-    sys.exit(1)
+OK = "200\n\n"
+FAIL = "500\n\n"
+SERVER_SCRIPT = os.path.basename(__file__)
 
-# Command-line arguments are received as strings.
-control_port = int(sys.argv[1]) # Therefore, convert the string argument into an integer.
+# Username -> Session. Shared between threads, so guarded by a lock.
+sessions = {}
+sessions_lock = threading.Lock()
 
-print("Starting server...")
-
-# ------------------------------------------------------------
-# CREATE THE CONTROL LISTENING SOCKET
-# ------------------------------------------------------------
-# This socket will only be used to LISTEN for new connections.
-
-# Ask the OS to create an IPv4 TCP socket (networking endpoint).
-control_listening_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-# Arguments: AF_INET --→ IPv4; SOCK_STREAM --→ TCP
-# Socket does not yet have the server's IP address and TCP control_port.
-print("Creating server socket")
 
 # ------------------------------------------------------------
-# BIND THE CONTROL LISTENING SOCKET
+# Per-client session
 # ------------------------------------------------------------
-# Associate the control listening socket with the server's IP address and TCP control_port.
-control_listening_socket.bind(("0.0.0.0", control_port))
-# 0.0.0.0 --> Listen for connections on all available IPv4 network interfaces.
+class Session:
+    """Everything the server tracks about one connected client."""
 
-# ------------------------------------------------------------
-# START LISTENING FOR CONTROL CONNECTIONS
-# ------------------------------------------------------------
-# Put the control socket into listening mode.
-# The socket is now waiting for incoming TCP control connection requests from clients.
-control_listening_socket.listen()
-print("Awaiting connections...")
+    def __init__(self, control_sock, address):
+        self.control = control_sock
+        self.address = address
+        self.data = None
+        self.username = None
+        # Several threads may write to this client's data socket
+        # (its own replies + other clients' broadcasts).
+        self.send_lock = threading.Lock()
 
-# Stores all currently logged-in clients in a Python dictionary.
-# USERNAME -> CLIENT INFORMATION (Control Socket , Data Socket)
-active_clients = {} # No users logged in yet.
+    # --- sending -------------------------------------------------
+    def send_data(self, payload):
+        """Send text or bytes over the DATA connection (raises OSError on failure)."""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        with self.send_lock:
+            self.data.sendall(payload)
 
-# Dictionary's protection for race condition when multiple threads
-# try to modify it at the same time.
-active_clients_lock = threading.Lock()
-
-# ------------------------------------------------------------
-# CLEAN UP A CLIENT
-# ------------------------------------------------------------
-
-def cleanup_client(client_username,control_connection_socket,data_connection_socket):
-    # Indicates whether this client had actually completed LOGIN.
-    was_active = False
-    # Snapshot of clients that remain logged in.
-    clients_snapshot = []
-
-    # --------------------------------------------------------
-    # REMOVE CLIENT FROM ACTIVE CLIENTS
-    # --------------------------------------------------------
-    if client_username is not None:
-        with active_clients_lock:
-            # Only remove the user if they are still registered.
-            if client_username in active_clients:
-                active_clients.pop(client_username)
-                was_active = True
-                # Take a snapshot AFTER removing the disconnected user.
-                clients_snapshot = list(active_clients.values())
-
-    # --------------------------------------------------------
-    # BROADCAST LOGOUT NOTIFICATION
-    # --------------------------------------------------------
-    # Only broadcast logout if the client had successfully
-    # logged in and was registered in active_clients.
-    if was_active:
-        logout_notification = f"200\n\nlogout\n{client_username}"
-
-        # Send the logout notification to every remaining client.
-        for client_info in clients_snapshot:
-            try:
-                client_info["data_socket"].sendall(logout_notification.encode())
-
-            except OSError:
-                pass
-
-    # --------------------------------------------------------
-    # CLOSE THIS CLIENT'S CONTROL SOCKET
-    # --------------------------------------------------------
-    try:
-        control_connection_socket.close()
-    except OSError:
-        pass
-
-    # --------------------------------------------------------
-    # CLOSE THIS CLIENT'S DATA SOCKET
-    # --------------------------------------------------------
-    if data_connection_socket is not None:
+    def try_send_data(self, payload):
+        """Send to this client but never raise; used when notifying OTHER clients."""
         try:
-            data_connection_socket.close()
+            self.send_data(payload)
         except OSError:
             pass
 
-# ------------------------------------------------------------
-# HANDLE PROCESS FOR EACH CLIENT (CONCURRENTLY)
-# ------------------------------------------------------------
+    def send_control(self, payload):
+        self.control.sendall(payload.encode())
 
-def handle_client(control_connection_socket, client_control_address):
+    # --- receiving -----------------------------------------------
+    def read_command(self):
+        """Read one command from the CONTROL connection. Returns None if closed."""
+        raw = self.control.recv(1024)
+        if not raw:
+            return None
+        return raw.decode().strip()
 
-    client_username = None
-    data_connection_socket = None
-    data_listening_socket = None
+    def read_file_bytes(self):
+        """Read an uploaded file from the DATA connection.
 
-    try:
-        
-        # ------------------------------------------------------------
-        # RECEIVE AND VALIDATE CONNECT COMMAND
-        # ------------------------------------------------------------
-        # Wait for the client to send the CONNECT command through
-        # the already-established CONTROL connection.
-        connect_request_bytes = control_connection_socket.recv(1024)
-
-        # recv() returning "blank" means the client closed the connection.
-        if not connect_request_bytes:
-            return
-
-        # Convert the received bytes into a string
-        connect_request = connect_request_bytes.decode().strip()
-
-        # Format: connect <ip_address> <control_port>
-        connect_parts = connect_request.split()
-
-        # CONNECT must contain exactly three parts and begin with "connect".
-        if len(connect_parts) != 3 or connect_parts[0] != "connect":
-            control_connection_socket.sendall("500\n\n".encode())
-            return
-
-        # The third argument must be a valid integer TCP port.
+        Wait for the first chunk, then keep reading until the sender goes quiet,
+        so files larger than one recv() are not truncated.
+        """
+        self.data.settimeout(None)
+        first = self.data.recv(4096)
+        if not first:
+            raise OSError("data connection closed")
+        chunks = [first]
+        self.data.settimeout(0.5)
         try:
-            int(connect_parts[2])
-        except ValueError:
-            control_connection_socket.sendall("500\n\n".encode())
-            return
-        
-        # ------------------------------------------------------------
-        # CREATE THE DATA LISTENING SOCKET
-        # ------------------------------------------------------------
-        # Ask the OS to create a new TCP socket (networking endpoint) for the server.
-        # This will listen for incoming TCP data connection requests from clients.
-        data_listening_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            while True:
+                piece = self.data.recv(4096)
+                if not piece:
+                    raise OSError("data connection closed")
+                chunks.append(piece)
+        except socket.timeout:
+            pass
+        finally:
+            self.data.settimeout(None)
+        return b"".join(chunks)
 
+
+def others_snapshot(exclude=None):
+    """Copy of the current sessions, optionally leaving one username out."""
+    with sessions_lock:
+        return [s for name, s in sessions.items() if name != exclude]
+
+
+# ------------------------------------------------------------
+# Connection setup: connect + data socket + login
+# ------------------------------------------------------------
+def do_connect(sess):
+    """Handle 'connect <ip> <port>' and open the data connection."""
+    request = sess.read_command()
+    if request is None:
+        return False
+
+    parts = request.split()
+    if len(parts) != 3 or parts[0] != "connect":
+        sess.send_control(FAIL)
+        return False
+    try:
+        int(parts[2])
+    except ValueError:
+        sess.send_control(FAIL)
+        return False
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
         print("Connection requested. Creating data socket")
-
-        # ------------------------------------------------------------
-        # BIND THE DATA LISTENING SOCKET
-        # ------------------------------------------------------------
-        # Associates the data socket with the server's IP address.
-        # The server asks the OS for any available TCP port.
-        data_listening_socket.bind(("0.0.0.0", 0))
-
-        # ------------------------------------------------------------
-        # START LISTENING FOR THE DATA CONNECTION
-        # ------------------------------------------------------------
-        data_listening_socket.listen()
-
-        # ------------------------------------------------------------
-        # FIND THE DATA PORT SELECTED BY THE OS
-        # ------------------------------------------------------------
-        # Use getsockname() to get the information address (IP[0] & port[1]) of the socket.
-        data_port = data_listening_socket.getsockname()[1]
-
-        # ------------------------------------------------------------
-        # SEND THE DATA PORT TO THE CLIENT
-        # ------------------------------------------------------------
-        # The server needs to sends the data port through the already
-        # established control connection sockets.
-        response = f"200\n\n{data_port}"
-        control_connection_socket.sendall(response.encode())
-
-        # ------------------------------------------------------------
-        # ACCEPT THE CLIENT'S DATA CONNECTION
-        # ------------------------------------------------------------
-        # The client will create a second TCP data socket and connect it to
-        # the data port that the server just sent.
-        # accept() then returns a NEW connected data socket for the server dedicated to
-        # the data connection.
-        data_connection_socket, client_data_address = data_listening_socket.accept()
-        # The listening socket is no longer needed after this client's
-        # data connection is established.
-        data_listening_socket.close() # Close temporary socket.
-        data_listening_socket = None
-
-        # ------------------------------------------------------------
-        # RECEIVE LOGIN COMMAND
-        # ------------------------------------------------------------
-        while True:
-            # The server receives the login command through the control TCP connection.
-            login_request_bytes = control_connection_socket.recv(1024)
-
-            if not login_request_bytes:
-                return
-
-            # Convert the received bytes into a Python string.
-            login_request = login_request_bytes.decode().strip()
-
-            # ------------------------------------------------------------
-            # EXTRACT THE CLIENT'S USERNAME
-            # ------------------------------------------------------------
-            # The login command format is:
-            # login username
-            # Split the string using " " as the separator but only once.
-            login_parts = login_request.split(" ", 1)
-
-            # A valid login command must contain: login <username>
-            if len(login_parts) != 2:
-                data_connection_socket.sendall("500\n\n".encode())
-                continue
-
-            command = login_parts[0]
-            requested_username = login_parts[1].strip()
-
-            # The command must be "login", and username cannot be empty.
-            if command != "login" or requested_username == "":
-                data_connection_socket.sendall("500\n\n".encode())
-                continue
-
-            # ------------------------------------------------------------------
-            # VALIDATE USERNAME UNIQUENESS
-            # ------------------------------------------------------------------
-            with active_clients_lock:
-                if requested_username in active_clients:
-                # Username is already being used.
-                    username_available = False
-                else:
-                    # Register the newly logged-in client.
-                    active_clients[requested_username] = {"control_socket": control_connection_socket,
-                        "data_socket": data_connection_socket}
-                    username_available = True
-
-            # Username already exists.
-            if not username_available:
-                login_response = "500\n\n"
-                # Send the login response through the data TCP connection.
-                data_connection_socket.sendall(login_response.encode())
-                # Stop processing THIS login request.
-                # Go back to the beginning of the login loop.
-                continue
-
-            # Username is unique and login was successful.
-            client_username = requested_username
-            login_response = "200\n\n"
-            data_connection_socket.sendall(login_response.encode())
-            print(f"Login requested by: {client_username}")
-
-            # --------------------------------------------------------
-            # BROADCAST JOIN NOTIFICATION
-            # --------------------------------------------------------
-            join_notification = f"200\n\njoin\n{client_username}"
-
-            with active_clients_lock:
-                # values() provides the items for each key (a special dictionary view).
-                # Therefore, we have to list them.
-                clients_snapshot = [client_info for username,
-                client_info in active_clients.items()
-                    if username != client_username]
-
-            # Application-level broadcasting
-            for client_info in clients_snapshot:
-                client_info["data_socket"].sendall(join_notification.encode())
-
-            # Exit the login loop and proceed to normal commands.
-            break
-
-        # --------------------------------------------------------
-        # RECEIVE AND PARSE COMMAND LOOP
-        # --------------------------------------------------------
-        while True:
-            # Wait for the next command through the CONTROL connection.
-            request_bytes = (control_connection_socket.recv(1024))
-            if not request_bytes:
-                break
-            # Convert the received bytes into a string.
-            request = request_bytes.decode().strip()
-
-            if request == "":
-                data_connection_socket.sendall("500\n\n".encode())
-                continue
-
-            # Split the string using " " as the separator but only once.
-            command_parts = request.split(" ", 1)
-            command = command_parts[0]
-
-            # ----------------------------------------------------
-            # WHO COMMAND
-            # ----------------------------------------------------
-            if command == "who":
-
-                if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                # Take a snapshot of the currently logged-in usernames.
-                with active_clients_lock:
-                    current_users = list(active_clients.keys())
-
-                # Convert:["alice", "bob", "charlie"]
-                # into: "alice,bob,charlie"
-                users_list = ", ".join(current_users)
-
-                print("Who requested. Sending users.")
-
-                # Construct the WHO response.
-                who_response = f"200\n\n{users_list}"
-
-                # Send the response only to the client who requested the command WHO.
-                data_connection_socket.sendall(who_response.encode())
-
-            # ----------------------------------------------------
-            # BROADCAST COMMAND
-            # ----------------------------------------------------
-            elif command == "broadcast":
-                if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-                # Extract the message after the word "broadcast".
-                message = command_parts[1].strip()
-
-                if message == "":
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                print(f"Broadcast requested by {client_username}")
-                print(f"Message: {message}")
-
-                # Already know who sent the command because this thread is for a particular client:
-                # Construct the message that every active client receives.
-                broadcast_response = f"200\n\nBroadcast\n{client_username}\n{message}"
-                with active_clients_lock:
-                    # information of all clients (data sockets)
-                    clients_snapshot = list(active_clients.values())
-                # broadcast: send the message to every client's data socket.
-                for client_info in clients_snapshot:
-                    client_info["data_socket"].sendall(broadcast_response.encode())
-
-            # ----------------------------------------------------
-            # PRIVATE COMMAND
-            # ----------------------------------------------------
-            elif command == "private":
-                if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                # command_parts[1] contains private information: specified recipient and message
-                private_parts = command_parts[1].split(" ", 1)
-
-                if len(private_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                # Extract the recipient's username and the message.
-                target_recipient = private_parts[0].strip()
-                message = private_parts[1].strip()
-
-                print(f"Private message from {client_username} to {target_recipient}")
-
-                if target_recipient == "" or message == "":
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                # Safely look for the recipient in active_clients.
-                with active_clients_lock:
-                    target_client = active_clients.get(target_recipient)
-
-                # ------------------------------------------------
-                # IF RECIPIENT DOES NOT EXIST
-                # ------------------------------------------------
-                if target_client is None:
-                    # Notify the sender that the private command failed.
-                    private_response = "500\n\n"
-                    data_connection_socket.sendall(private_response.encode())
-
-                # ------------------------------------------------
-                # RECIPIENT EXISTS
-                # ------------------------------------------------
-                else:
-                    # Get the data socket of the recipient.
-                    target_data_socket = target_client["data_socket"]
-
-                    # Construct the private message for the recipient.
-                    private_message = f"200\n\nPrivate\n{client_username}\n{message}"
-
-                    # Send the private message only to the recipient.
-                    target_data_socket.sendall(private_message.encode())
-
-                    # Confirm success to the sender.
-                    sender_response = "200\n\n"
-                    data_connection_socket.sendall(sender_response.encode())
-
-            # ----------------
-            # STOR COMMAND
-            # ----------------
-            elif command == "stor":
-                if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                filename = command_parts[1].strip()
-
-                if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                print(f"Stor {filename} requested by {client_username}")
-
-                try:
-                
-                    # Receive the file contents through the DATA connection.
-                    file_data = data_connection_socket.recv(4096)
-    
-                    # Create the file in the current directory and write the received bytes (data) to it.
-                    # open() means open or create the requested file using the name stored in filename.
-                    # "wb" means write binary mode, not to limit the range of file types.
-                    # We use binary because file_data contains bytes.
-                    with open(filename, "wb") as file:
-                        file.write(file_data)
-    
-                    print("STOR complete")
-        
-                    data_connection_socket.sendall("200\n\n".encode())
-    
-                except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
-
-            # ----------------------------
-            # RETR COMMAND
-            # ----------------------------
-            elif command == "retr":
-                if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                filename = command_parts[1].strip()
-
-                if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-                    
-                try:
-                    # Open the requested file and read its contents as bytes.
-                    with open(filename, "rb") as file:
-                        file_data = file.read()
-                        
-                    print(f"Retr requested by {client_username}. Sending file: {filename}")
-
-                    retr_response = b"200\n\n" + file_data
-                    data_connection_socket.sendall(retr_response)
-
-                    print("File sent.")
-
-                except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
-
-            # -------------
-            # DELE COMMAND
-            # ---------------
-            elif command == "dele":
-                if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                filename = command_parts[1].strip()
-
-                if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                try:
-                    print(f"Dele requested by {client_username}. Deleting file: {filename}")
-
-                    # Delete the requested file from the server's current directory
-                    os.remove(filename)
-                    print("Delete complete")
-
-                    # DELE only returns the status code on success.
-                    data_connection_socket.sendall("200\n\n".encode())
-
-                except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
-                        
-            # -------------
-            # LIST COMMAND
-            # -------------
-
-            elif command == "list":
-                if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-
-                files = sorted(filename for filename in os.listdir(".")
-                # (".") means current directory
-                # Show every filename in the current directory
-                # sorted() orders filenames in alphabetic order.
-                               
-                # Check whether the path used leads to an actual file
-                # This avoids sending directories instead of files.
-                if os.path.isfile(filename))
-
-                # Convert the filenames into the required comma-separated format.
-                files_list = ", ".join(files)
-                
-                print(f"List requested by {client_username}. Sending files.")
-
-                # Send the status code and file list through the DATA connection.
-                list_response = f"200\n\n{files_list}"
-                data_connection_socket.sendall(list_response.encode())
-            
-            # ----------------------------------------------------
-            # QUIT COMMAND
-            # ----------------------------------------------------
-            elif command == "quit":
-                if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
-                    continue
-                # Send success response to client
-                print(f"Quit requested by {client_username}")
-                quit_response = "200\n\n"
-                data_connection_socket.sendall(quit_response.encode())
-                return
-
-            # For completely unknown commands.
-            else:
-                data_connection_socket.sendall("500\n\n".encode())
-
-    # ------------------------------------------------------------
-    # UNEXPECTED CLIENT DISCONNECTION
-    # ------------------------------------------------------------
-    except OSError:
-        print("Client disconnected unexpectedly:", client_control_address)
-
-    # ------------------------------------------------------------
-    # ALWAYS CLEAN UP THIS CLIENT
-    # ------------------------------------------------------------
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        sess.send_control(f"200\n\n{port}")
+        sess.data, _ = listener.accept()
     finally:
-    # If something failed before the data connection was accepted,
-    # close the temporary data listening socket too.
-        if data_listening_socket is not None:
+        listener.close()
+    return True
+
+
+def do_login(sess):
+    """Loop until the client logs in with a unique username."""
+    while True:
+        request = sess.read_command()
+        if request is None:
+            return False
+
+        parts = request.split(" ", 1)
+        if len(parts) != 2 or parts[0] != "login" or parts[1].strip() == "":
+            sess.send_data(FAIL)
+            continue
+
+        wanted = parts[1].strip()
+        with sessions_lock:
+            taken = wanted in sessions
+            if not taken:
+                sessions[wanted] = sess
+
+        if taken:
+            sess.send_data(FAIL)
+            continue
+
+        sess.username = wanted
+        sess.send_data(OK)
+        print(f"Login requested by: {wanted}")
+
+        for other in others_snapshot(exclude=wanted):
+            other.try_send_data(f"200\n\njoin\n{wanted}")
+        return True
+
+
+# ------------------------------------------------------------
+# Command handlers. Each receives (session, argument_or_None).
+# Return True only when the client should be disconnected.
+# ------------------------------------------------------------
+def cmd_who(sess, arg):
+    if arg is not None:
+        sess.send_data(FAIL)
+        return
+    with sessions_lock:
+        names = list(sessions.keys())
+    print("Who requested. Sending users.")
+    sess.send_data("200\n\n" + ", ".join(names))
+
+
+def cmd_broadcast(sess, arg):
+    message = arg.strip() if arg else ""
+    if message == "":
+        sess.send_data(FAIL)
+        return
+    print(f"Broadcast requested by {sess.username}")
+    print(f"Message: {message}")
+    note = f"200\n\nBroadcast\n{sess.username}\n{message}"
+    for target in others_snapshot():
+        target.try_send_data(note)
+
+
+def cmd_private(sess, arg):
+    pieces = arg.split(" ", 1) if arg else []
+    if len(pieces) != 2:
+        sess.send_data(FAIL)
+        return
+    recipient, message = pieces[0].strip(), pieces[1].strip()
+    print(f"Private message from {sess.username} to {recipient}")
+    if recipient == "" or message == "":
+        sess.send_data(FAIL)
+        return
+
+    with sessions_lock:
+        target = sessions.get(recipient)
+    if target is None:
+        sess.send_data(FAIL)
+        return
+
+    target.try_send_data(f"200\n\nPrivate\n{sess.username}\n{message}")
+    sess.send_data(OK)
+
+
+def safe_name(arg):
+    """Strip any directory part so clients can't touch paths outside the server folder."""
+    if arg is None:
+        return ""
+    return os.path.basename(arg.strip())
+
+
+def cmd_stor(sess, arg):
+    name = safe_name(arg)
+    if name == "" or name == SERVER_SCRIPT:
+        sess.send_data(FAIL)
+        return
+    print(f"Stor {name} requested by {sess.username}")
+    try:
+        content = sess.read_file_bytes()
+        with open(name, "wb") as fh:
+            fh.write(content)
+        print("STOR complete")
+        sess.send_data(OK)
+    except OSError:
+        sess.send_data(FAIL)
+
+
+def cmd_retr(sess, arg):
+    name = safe_name(arg)
+    if name == "":
+        sess.send_data(FAIL)
+        return
+    try:
+        with open(name, "rb") as fh:
+            content = fh.read()
+    except OSError:
+        sess.send_data(FAIL)
+        return
+    print(f"Retr requested by {sess.username}. Sending file: {name}")
+    sess.send_data(b"200\n\n" + content)
+    print("File sent.")
+
+
+def cmd_dele(sess, arg):
+    name = safe_name(arg)
+    if name == "" or name == SERVER_SCRIPT:
+        sess.send_data(FAIL)
+        return
+    try:
+        print(f"Dele requested by {sess.username}. Deleting file: {name}")
+        os.remove(name)
+        print("Delete complete")
+        sess.send_data(OK)
+    except OSError:
+        sess.send_data(FAIL)
+
+
+def cmd_list(sess, arg):
+    if arg is not None:
+        sess.send_data(FAIL)
+        return
+    names = sorted(
+        entry for entry in os.listdir(".")
+        if os.path.isfile(entry) and entry != SERVER_SCRIPT
+    )
+    print(f"List requested by {sess.username}. Sending files.")
+    sess.send_data("200\n\n" + ", ".join(names))
+
+
+def cmd_quit(sess, arg):
+    if arg is not None:
+        sess.send_data(FAIL)
+        return False
+    print(f"Quit requested by {sess.username}")
+    sess.send_data(OK)
+    return True
+
+
+COMMANDS = {
+    "who": cmd_who,
+    "broadcast": cmd_broadcast,
+    "private": cmd_private,
+    "stor": cmd_stor,
+    "retr": cmd_retr,
+    "dele": cmd_dele,
+    "list": cmd_list,
+    "quit": cmd_quit,
+}
+
+
+def command_loop(sess):
+    while True:
+        request = sess.read_command()
+        if request is None:
+            return
+        if request == "":
+            sess.send_data(FAIL)
+            continue
+
+        pieces = request.split(" ", 1)
+        handler = COMMANDS.get(pieces[0])
+        if handler is None:
+            sess.send_data(FAIL)
+            continue
+
+        arg = pieces[1] if len(pieces) == 2 else None
+        if handler(sess, arg):
+            return
+
+
+# ------------------------------------------------------------
+# Thread entry point + cleanup
+# ------------------------------------------------------------
+def disconnect(sess):
+    """Remove the client, announce the logout, close both sockets."""
+    was_logged_in = False
+    if sess.username is not None:
+        with sessions_lock:
+            if sessions.get(sess.username) is sess:
+                del sessions[sess.username]
+                was_logged_in = True
+
+    if was_logged_in:
+        for other in others_snapshot():
+            other.try_send_data(f"200\n\nlogout\n{sess.username}")
+
+    for sock in (sess.control, sess.data):
+        if sock is not None:
             try:
-                data_listening_socket.close()
+                sock.close()
             except OSError:
                 pass
 
-        # Remove client from active_clients if necessary,
-        # broadcast logout, and close CONTROL/DATA sockets.
-        cleanup_client(
-            client_username,
-            control_connection_socket,
-            data_connection_socket
-        )
+
+def serve_client(control_sock, address):
+    sess = Session(control_sock, address)
+    try:
+        if do_connect(sess) and do_login(sess):
+            command_loop(sess)
+    except OSError:
+        print("Client disconnected unexpectedly:", address)
+    finally:
+        disconnect(sess)
+
 
 # ------------------------------------------------------------
-# ACCEPT CLIENTS CONTROL CONNECTION
+# Main
 # ------------------------------------------------------------
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python server.py <control_port>")
+        sys.exit(1)
 
-# MAIN THREAD: Keep accepting new CONTROL connections and give each
-# one to a separate worker thread.
-while True:
-    # When the client successfully connects, accept() returns
-    # a new connected TCP socket to communicate with this client.
-    control_connection_socket, client_control_address = control_listening_socket.accept()
-    # client_control_address contains information about the client (IP address
-    # and random TCP Port assigned by OS)
+    port = int(sys.argv[1])
+    print("Starting server...")
 
-    client_thread = threading.Thread( #Creates a Thread object
-        # When threat started, run function with specified args.
-        target=handle_client,
-        args=(control_connection_socket, client_control_address)
-    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    print("Creating server socket")
+    listener.bind(("0.0.0.0", port))
+    listener.listen()
+    print("Awaiting connections...")
 
-    client_thread.start()
+    while True:
+        conn, addr = listener.accept()
+        threading.Thread(target=serve_client, args=(conn, addr), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()
