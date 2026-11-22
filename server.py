@@ -265,8 +265,7 @@ def handle_client(control_connection_socket, client_control_address):
                 login_plaintext_bytes += decrypted_chunk
 
             print("Received encrypted message")
-            message_hash = hashlib.sha256(decrypted_request_bytes).digest()
-
+            
             # Convert the received bytes into a Python string.
             login_request = login_plaintext_bytes.decode().strip()
 
@@ -288,7 +287,7 @@ def handle_client(control_connection_socket, client_control_address):
 
             command = login_parts[0]
             # detect missing separator or failure for any components of expected message
-            requested_username, separator, client_public_key_pem = login_parts[1].split("\n", 1)
+            requested_username, separator, client_public_key_pem = login_parts[1].partition("\n", 1)
             requested_username = requested_username.strip() # removes any whitespace around the username
 
             # The command must be "login", and username cannot be empty.
