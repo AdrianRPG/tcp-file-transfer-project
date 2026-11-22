@@ -335,11 +335,7 @@ def handle_client(control_connection_socket, client_control_address):
             join_notification = f"200\n\njoin\n{client_username}"
 
             with active_clients_lock:
-                # values() provides the items for each key (a special dictionary view).
-                # Therefore, we have to list them.
-                clients_snapshot = [client_info for username,
-                client_info in active_clients.items()
-                    if username != client_username]
+                clients_snapshot = list(active_clients.values())
 
             # Application-level broadcasting
             for client_info in clients_snapshot:
