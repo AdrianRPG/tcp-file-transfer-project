@@ -2,6 +2,9 @@ import socket # Python's built-in library for socket/network programming.
 import sys # Python's library that provides access to command-line arguments.
 import threading # Python's library that lets multiple sections of program execute concurrently.
 import os # Python's library to obtain file names from directories.
+from cryptography.hazmat.primitives.asymmetric import rsa # library.cryptographyoperations.cryptographytype - module
+from cryptography.hazmat.primitives import serialization # module to convert cryptographic keys into a
+# standardized byte representation to send over socket. 
 
 # ------------------------------------------------------------
 # READ THE CONTROL PORT FROM THE COMMAND LINE
@@ -15,6 +18,26 @@ if len(sys.argv) != 2:
 control_port = int(sys.argv[1]) # Therefore, convert the string argument into an integer.
 
 print("Starting server...")
+print("Creating RSA keypair")
+
+# ------------------------------------------------------------
+# CREATE THE SERVER'S RSA PRIVATE KEY
+# ------------------------------------------------------------
+# Store private key generated in memory to decrypt messages that clients encrypt.
+server_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048) # cryptographic object
+# key_size --> creates a 2048-bit RSA key
+
+# ------------------------------------------------------------------
+# CREATE THE SERVER'S RSA PUBLIC KEY using the GENERATED PRIVATE KEY
+# ------------------------------------------------------------------
+# Extracts the public key that belongs to the private key just produced.
+server_public_key = server_private_key.public_key() # cryptographic object
+# It can be shared with clients so they can encrypt their messages for the server.
+
+# Python Object --> Standardized PEM format byte representation (Standard Structure)
+server_public_key_bytes = server_public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+print("RSA keypair created")
 
 # ------------------------------------------------------------
 # CREATE THE CONTROL LISTENING SOCKET
@@ -176,10 +199,10 @@ def handle_client(control_connection_socket, client_control_address):
         # ------------------------------------------------------------
         # SEND THE DATA PORT TO THE CLIENT
         # ------------------------------------------------------------
-        # The server needs to sends the data port through the already
-        # established control connection sockets.
-        response = f"200\n\n{data_port}"
-        control_connection_socket.sendall(response.encode())
+        # The server needs to send the data port through the already
+        # established control connection sockets AND its OWN PUBLIC KEY.
+        response = b"200\n\n" + str(data_port).encode() + b"\n" + server_public_key_bytes
+        control_connection_socket.sendall(response)
 
         # ------------------------------------------------------------
         # ACCEPT THE CLIENT'S DATA CONNECTION
