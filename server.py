@@ -90,7 +90,7 @@ def encrypt_with_public_key(message_bytes, public_key):
 def decrypt_with_private_key(encrypted_message, private_key):
     decrypted_message = b""
     for start in range(0, len(encrypted_message), RSA_CIPHERTEXT_BLOCK_SIZE):
-        encrypted_block = encrypted_message[start:start + RSA_CIPHERTEXT_BLOCK_SIZE}
+        encrypted_block = encrypted_message[start:start + RSA_CIPHERTEXT_BLOCK_SIZE]
         decrypted_chunk = private_key.decrypt(encrypted_block, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
         decrypted_message += decrypted_chunk
     return decrypted_message
