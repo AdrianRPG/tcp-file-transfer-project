@@ -9,6 +9,14 @@ RSA_PLAINTEXT_CHUNK_SIZE = 190 # maximum amount of plaintext to place into each 
 RSA_CIPHERTEXT_BLOCK_SIZE = 256 # A 2048-bit RSA key produces an encrypted block of 2048 bits / 8 = 256 bytes
 # so every plaintext chunk of up to 190 bytes will become 256 encrypted bytes (ciphertext).
 
+def decrypt_with_private_key(encrypted_message, private_key):
+    decrypted_message = b""
+    for start in range(0, len(encrypted_message), RSA_CIPHERTEXT_BLOCK_SIZE):
+        encrypted_block = encrypted_message[start:start + RSA_CIPHERTEXT_BLOCK_SIZE}
+        decrypted_chunk = private_key.decrypt(encrypted_block, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        decrypted_message += decrypted_chunk
+    return decrypted_message
+
 # getting server messages 
 def receive_server_messages(data_connection_socket):
 
@@ -295,12 +303,19 @@ try:
         
         control_connection_socket.sendall(encrypted_login)
 
-        login_response_bytes = data_connection_socket.recv(1024)
+        login_response_bytes = b""
+        while len(login_response_bytes) < RSA_CIPHERTEXT_BLOCK_SIZE:
+            response_piece = data_connection_socket.recv(RSA_CIPHERTEXT_BLOCK_SIZE - len(login_response_bytes))
+            if not response_piece:
+                raise OSError("Server closed the data connection.")
+            login_reponse_bytes += response_piece
 
+        login_response_plaintext = decrypt_with_private_key(login_response_bytes, client_private_key)
+        
         if not login_response_bytes:
             raise OSError("Server closed the data connection.")
 
-        login_response = login_response_bytes.decode()
+        login_response = login_response_plaintext.decode()
 
         status_code = login_response.split("\n", 1)[0].strip()
 
