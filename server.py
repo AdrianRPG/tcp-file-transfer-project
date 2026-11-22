@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import serialization # module to convert cry
 # standardized byte representation to send over socket. 
 from cryptography.hazmat.primitives.asymmetric import padding # padding methods for the server to decrypt encrypted blocks
 from cryptography.hazmat.primitives import hashes # hash algorithm --> OAEP - server must use the same parameters
+import hashlib # hashing library to calculate a SHA-256 digest
 
 RSA_CIPHERTEXT_BLOCK_SIZE = 256 # Every RSA-encrypted chunk produced by client has 256 bytes
 RSA_PLAINTEXT_CHUNK_SIZE = 190
@@ -71,7 +72,7 @@ control_listening_socket.listen()
 print("Awaiting connections...")
 
 # Stores all currently logged-in clients in a Python dictionary.
-# USERNAME -> CLIENT INFORMATION (Control Socket , Data Socket)
+# USERNAME -> CLIENT INFORMATION (Control Socket, Data Socket)
 active_clients = {} # No users logged in yet.
 
 # Dictionary's protection for race condition when multiple threads
@@ -84,7 +85,15 @@ def encrypt_with_public_key(message_bytes, public_key):
         chunk = message_bytes[start:start + RSA_PLAINTEXT_CHUNK_SIZE]
         encrypted_chunk = public_key.encrypt(chunk, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
         encrypted_message += encrypted_chunk
-    return encrypted_message        
+    return encrypted_message    
+
+def decrypt_with_private_key(encrypted_message, private_key):
+    decrypted_message = b""
+    for start in range(0, len(encrypted_message), RSA_CIPHERTEXT_BLOCK_SIZE):
+        encrypted_block = encrypted_message[start:start + RSA_CIPHERTEXT_BLOCK_SIZE}
+        decrypted_chunk = private_key.decrypt(encrypted_block, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        decrypted_message += decrypted_chunk
+    return decrypted_message
 
 # ------------------------------------------------------------
 # CLEAN UP A CLIENT
@@ -119,7 +128,8 @@ def cleanup_client(client_username,control_connection_socket,data_connection_soc
         # Send the logout notification to every remaining client.
         for client_info in clients_snapshot:
             try:
-                client_info["data_socket"].sendall(logout_notification.encode())
+                encrypted_logout_notification = encrypt_with_public_key(logout_notification.encode(), client_info["public_key"]) 
+                client_info["data_socket"].sendall(encrypted_logout_notification)
 
             except OSError:
                 pass
@@ -255,6 +265,7 @@ def handle_client(control_connection_socket, client_control_address):
                 login_plaintext_bytes += decrypted_chunk
 
             print("Received encrypted message")
+            message_hash = hashlib.sha256(decrypted_request_bytes).digest()
 
             # Convert the received bytes into a Python string.
             login_request = login_plaintext_bytes.decode().strip()
@@ -305,16 +316,18 @@ def handle_client(control_connection_socket, client_control_address):
             # Username already exists.
             if not username_available:
                 login_response = "500\n\n"
+                encrypted_login_response = encrypt_with_public_key(login_response.encode(), client_public_key)
                 # Send the login response through the data TCP connection.
-                data_connection_socket.sendall(login_response.encode())
+                data_connection_socket.sendall(encrypted_login_response)
                 # Stop processing THIS login request.
                 # Go back to the beginning of the login loop.
                 continue
 
-            # Username is unique and login was successful.
+            # Username is unique, and login was successful.
             client_username = requested_username
             login_response = "200\n\n"
-            data_connection_socket.sendall(login_response.encode())
+            encrypted_login_response = encrypt_with_public_key(login_response.encode(), client_public_key)
+            data_connection_socket.sendall(encrypted_login_response)
             print(f"Login requested by: {client_username}")
 
             # --------------------------------------------------------
@@ -331,7 +344,8 @@ def handle_client(control_connection_socket, client_control_address):
 
             # Application-level broadcasting
             for client_info in clients_snapshot:
-                client_info["data_socket"].sendall(join_notification.encode())
+                encrypted_join_notification = encrypt_with_public_key(join_notification.encode(), client_info["public_key"])
+                client_info["data_socket"].sendall(encrypted_join_notification)
 
             # Exit the login loop and proceed to normal commands.
             break
@@ -340,15 +354,23 @@ def handle_client(control_connection_socket, client_control_address):
         # RECEIVE AND PARSE COMMAND LOOP
         # --------------------------------------------------------
         while True:
-            # Wait for the next command through the CONTROL connection.
-            request_bytes = (control_connection_socket.recv(1024))
-            if not request_bytes:
+            # Wait for the next encrypted command through the CONTROL connection.
+            request_bytes = b""
+            request_piece = control_connection_socket.recv(4096)
+            if not request_piece:
                 break
+            request_bytes += request_piece
+            decrypted_request_bytes = decrypt_with_private_key(request_bytes, server_private_key)
+            print("Received encrypted message")
+            message_hash = hashlib.sha256(decrypted_request_bytes).digest()
+            
             # Convert the received bytes into a string.
-            request = request_bytes.decode().strip()
+            request = decrypted_request_bytes.decode().strip()
 
             if request == "":
-                data_connection_socket.sendall("500\n\n".encode())
+                empty_request_response = "500\n\n"
+                encrypted_empty_request_response = encrypt_with_public_key(empty_request_response.encode(), client_public_key)
+                data_connection_socket.sendall(encrypted_empty_request_response)
                 continue
 
             # Split the string using " " as the separator but only once.
@@ -361,7 +383,9 @@ def handle_client(control_connection_socket, client_control_address):
             if command == "who":
 
                 if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    who_error_response = "500\n\n"
+                    encrypted_who_error_response = encrypt_with_public_key(who_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_who_error_response)
                     continue
 
                 # Take a snapshot of the currently logged-in usernames.
@@ -376,22 +400,27 @@ def handle_client(control_connection_socket, client_control_address):
 
                 # Construct the WHO response.
                 who_response = f"200\n\n{users_list}"
+                encrypted_who_response = encrypt_with_public_key(who_response.encode(), client_public_key)
 
                 # Send the response only to the client who requested the command WHO.
-                data_connection_socket.sendall(who_response.encode())
+                data_connection_socket.sendall(encrypted_who_response)
 
             # ----------------------------------------------------
             # BROADCAST COMMAND
             # ----------------------------------------------------
             elif command == "broadcast":
                 if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    broadcast_error_response = "500\n\n"
+                    encrypted_broadcast_error_response = encrypt_with_public_key(broadcast_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_broadcast_error_response)
                     continue
                 # Extract the message after the word "broadcast".
                 message = command_parts[1].strip()
 
                 if message == "":
-                    data_connection_socket.sendall("500\n\n".encode())
+                    broadcast_error_response = "500\n\n"
+                    encrypted_broadcast_error_response = encrypt_with_public_key(broadcast_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_broadcast_error_response)
                     continue
 
                 print(f"Broadcast requested by {client_username}")
@@ -405,21 +434,26 @@ def handle_client(control_connection_socket, client_control_address):
                     clients_snapshot = list(active_clients.values())
                 # broadcast: send the message to every client's data socket.
                 for client_info in clients_snapshot:
-                    client_info["data_socket"].sendall(broadcast_response.encode())
+                    encrypted_broadcast_response = encrypt_with_public_key(broadcast_response.encode(), client_info["public_key"])
+                    client_info["data_socket"].sendall(encrypted_broadcast_response)
 
             # ----------------------------------------------------
             # PRIVATE COMMAND
             # ----------------------------------------------------
             elif command == "private":
                 if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    private_error_response = "500\n\n"
+                    encrypted_private_error_response = encrypt_with_public_key(private_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_private_error_response)
                     continue
 
                 # command_parts[1] contains private information: specified recipient and message
                 private_parts = command_parts[1].split(" ", 1)
 
                 if len(private_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    private_error_response = "500\n\n"
+                    encrypted_private_error_response = encrypt_with_public_key(private_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_private_error_response)
                     continue
 
                 # Extract the recipient's username and the message.
@@ -429,7 +463,9 @@ def handle_client(control_connection_socket, client_control_address):
                 print(f"Private message from {client_username} to {target_recipient}")
 
                 if target_recipient == "" or message == "":
-                    data_connection_socket.sendall("500\n\n".encode())
+                    private_error_response = "500\n\n"
+                    encrypted_private_error_response = encrypt_with_public_key(private_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_private_error_response)
                     continue
 
                 # Safely look for the recipient in active_clients.
@@ -442,7 +478,8 @@ def handle_client(control_connection_socket, client_control_address):
                 if target_client is None:
                     # Notify the sender that the private command failed.
                     private_response = "500\n\n"
-                    data_connection_socket.sendall(private_response.encode())
+                    encrypted_private_response = encrypt_with_public_key(private_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_private_response)
 
                 # ------------------------------------------------
                 # RECIPIENT EXISTS
@@ -454,25 +491,32 @@ def handle_client(control_connection_socket, client_control_address):
                     # Construct the private message for the recipient.
                     private_message = f"200\n\nPrivate\n{client_username}\n{message}"
 
+                    encrypted_private_message = encrypt_with_public_key(private_message.encode(), target_client["public_key"]) 
+
                     # Send the private message only to the recipient.
-                    target_data_socket.sendall(private_message.encode())
+                    target_data_socket.sendall(encrypted_private_message)
 
                     # Confirm success to the sender.
                     sender_response = "200\n\n"
-                    data_connection_socket.sendall(sender_response.encode())
+                    encrypted_sender_response = encrypt_with_public_key(sender_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_sender_response)
 
             # ----------------
             # STOR COMMAND
             # ----------------
             elif command == "stor":
                 if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    stor_error_response = "500\n\n"
+                    encrypted_stor_error_response = encrypt_with_public_key(stor_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_stor_error_response)
                     continue
 
                 filename = command_parts[1].strip()
 
                 if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
+                    stor_error_response = "500\n\n"
+                    encrypted_stor_error_response = encrypt_with_public_key(stor_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_stor_error_response)
                     continue
 
                 print(f"Stor {filename} requested by {client_username}")
@@ -490,24 +534,32 @@ def handle_client(control_connection_socket, client_control_address):
                         file.write(file_data)
     
                     print("STOR complete")
-        
-                    data_connection_socket.sendall("200\n\n".encode())
+
+                    stor_success_response = "200\n\n"
+                    encrypted_stor_success_response = encrypt_with_public_key(stor_success_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_stor_success_response)
     
                 except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    stor_error_response = "500\n\n"
+                    encrypted_stor_error_response = encrypt_with_public_key(stor_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_stor_error_response)
 
             # ----------------------------
             # RETR COMMAND
             # ----------------------------
             elif command == "retr":
                 if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    retr_error_response = "500\n\n"
+                    encrypted_retr_error_response = encrypt_with_public_key(retr_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_retr_error_response)
                     continue
 
                 filename = command_parts[1].strip()
 
                 if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
+                    retr_error_response = "500\n\n"
+                    encrypted_retr_error_response = encrypt_with_public_key(retr_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_retr_error_response)
                     continue
                     
                 try:
@@ -518,25 +570,32 @@ def handle_client(control_connection_socket, client_control_address):
                     print(f"Retr requested by {client_username}. Sending file: {filename}")
 
                     retr_response = b"200\n\n" + file_data
-                    data_connection_socket.sendall(retr_response)
+                    encrypted_retr_response = encrypt_with_public_key(retr_response, client_public_key)
+                    data_connection_socket.sendall(encrypted_retr_response)
 
                     print("File sent.")
 
                 except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    retr_error_response = "500\n\n"
+                    encrypted_retr_error_response = encrypt_with_public_key(retr_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_retr_error_response)
 
             # -------------
             # DELE COMMAND
             # ---------------
             elif command == "dele":
                 if len(command_parts) != 2:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    dele_error_response = "500\n\n"
+                    encrypted_dele_error_response = encrypt_with_public_key(dele_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_dele_error_response)
                     continue
 
                 filename = command_parts[1].strip()
 
                 if filename == "":
-                    data_connection_socket.sendall("500\n\n".encode())
+                    dele_error_response = "500\n\n"
+                    encrypted_dele_error_response = encrypt_with_public_key(dele_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_dele_error_response)
                     continue
 
                 try:
@@ -546,11 +605,16 @@ def handle_client(control_connection_socket, client_control_address):
                     os.remove(filename)
                     print("Delete complete")
 
+                    dele_success_response = "200\n\n"
+                    encrypted_dele_success_response = encrypt_with_public_key(dele_success_response.encode(), client_public_key)
+
                     # DELE only returns the status code on success.
-                    data_connection_socket.sendall("200\n\n".encode())
+                    data_connection_socket.sendall(encrypted_dele_success_response)
 
                 except OSError:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    dele_error_response = "500\n\n"
+                    encrypted_dele_error_response = encrypt_with_public_key(dele_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_dele_error_response)
                         
             # -------------
             # LIST COMMAND
@@ -558,7 +622,9 @@ def handle_client(control_connection_socket, client_control_address):
 
             elif command == "list":
                 if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    list_error_response = "500\n\n"
+                    encrypted_list_error_response = encrypt_with_public_key(list_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_list_error_response)
                     continue
 
                 files = sorted(filename for filename in os.listdir(".")
@@ -577,24 +643,30 @@ def handle_client(control_connection_socket, client_control_address):
 
                 # Send the status code and file list through the DATA connection.
                 list_response = f"200\n\n{files_list}"
-                data_connection_socket.sendall(list_response.encode())
+                encrypted_list_response = encrypt_with_public_key(list_response.encode(), client_public_key)
+                data_connection_socket.sendall(encrypted_list_response)
             
             # ----------------------------------------------------
             # QUIT COMMAND
             # ----------------------------------------------------
             elif command == "quit":
                 if len(command_parts) != 1:
-                    data_connection_socket.sendall("500\n\n".encode())
+                    quit_error_response = "500\n\n"
+                    encrypted_quit_error_response = encrypt_with_public_key(quit_error_response.encode(), client_public_key)
+                    data_connection_socket.sendall(encrypted_quit_error_response)
                     continue
                 # Send success response to client
                 print(f"Quit requested by {client_username}")
                 quit_response = "200\n\n"
-                data_connection_socket.sendall(quit_response.encode())
+                encrypted_quit_response = encrypt_with_public_key(quit_response.encode(), client_public_key)
+                data_connection_socket.sendall(encrypted_quit_response)
                 return
 
             # For completely unknown commands.
             else:
-                data_connection_socket.sendall("500\n\n".encode())
+                unknown_error_response = "500\n\n"
+                encrypted_unknown_error_response = encrypt_with_public_key(unknown_error_response.encode(), client_public_key)
+                data_connection_socket.sendall(encrypted_unknown_error_response)
 
     # ------------------------------------------------------------
     # UNEXPECTED CLIENT DISCONNECTION
