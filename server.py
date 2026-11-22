@@ -5,6 +5,11 @@ import os # Python's library to obtain file names from directories.
 from cryptography.hazmat.primitives.asymmetric import rsa # library.cryptographyoperations.cryptographytype - module
 from cryptography.hazmat.primitives import serialization # module to convert cryptographic keys into a
 # standardized byte representation to send over socket. 
+from cryptography.hazmat.primitives.asymmetric import padding # padding methods for the server to decrypt encrypted blocks
+from cryptography.hazmat.primitives import hashes # hash algorithm --> OAEP - server must use the same parameters
+
+RSA_CIPHERTEXT_BLOCK_SIZE = 256 # Every RSA-encrypted chunk produced by client has 256 bytes
+RSA_PLAINTEXT_CHUNK_SIZE = 190
 
 # ------------------------------------------------------------
 # READ THE CONTROL PORT FROM THE COMMAND LINE
@@ -72,6 +77,14 @@ active_clients = {} # No users logged in yet.
 # Dictionary's protection for race condition when multiple threads
 # try to modify it at the same time.
 active_clients_lock = threading.Lock()
+
+def encrypt_with_public_key(message_bytes, public_key):
+    encrypted_message = b"" # empty buffer to accumulate all RSA-blocks for the outgoing message
+    for start in range(0, len(message_bytes), RSA_PLAINTEXT_CHUNK_SIZE):
+        chunk = message_bytes[start:start + RSA_PLAINTEXT_CHUNK_SIZE]
+        encrypted_chunk = public_key.encrypt(chunk, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        encrypted_message += encrypted_chunk
+    return encrypted_message        
 
 # ------------------------------------------------------------
 # CLEAN UP A CLIENT
@@ -222,21 +235,40 @@ def handle_client(control_connection_socket, client_control_address):
         # ------------------------------------------------------------
         while True:
             # The server receives the login command through the control TCP connection.
-            login_request_bytes = control_connection_socket.recv(1024)
+            login_request_bytes = b"" # creating empty buffer to fill it with the complete 256 encrypted RSA blocks
+            login_plaintext_bytes = b"" # creating empty buffer to fill it with the decrypted login data
+            while b"-----END PUBLIC KEY-----" not in login_plaintext_bytes:
+                # login plaintext client constructed ends with PEM public key
+                encrypted_block = b"" # Empty buffer for complete RSA ciphertext block
+                # keep receiving bytes until encrypted block contains one complete RSA of 256
+                while len(encrypted_block) < RSA_CIPHERTEXT_BLOCK_SIZE:
+                    # receive only the # of bytes still missing to complete one 256-byte RSA
+                    block_piece = control_connection_socket.recv(RSA_CIPHERTEXT_BLOCK_SIZE - len(encrypted_block))
+                    if not block_piece:
+                        return # if client disconnected before server received a complete RSA block, stop processing.
+                    encrypted_block += block_piece
 
-            if not login_request_bytes:
-                return
+                # use server private key to decrypt ciphertext block client encrypted with server public key.
+                decrypted_chunk = server_private_key.decrypt(encrypted_block, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+
+                # append plaintext piece to full reconstructed message
+                login_plaintext_bytes += decrypted_chunk
+
+            print("Received encrypted message")
 
             # Convert the received bytes into a Python string.
-            login_request = login_request_bytes.decode().strip()
+            login_request = login_plaintext_bytes.decode().strip()
 
             # ------------------------------------------------------------
             # EXTRACT THE CLIENT'S USERNAME
             # ------------------------------------------------------------
             # The login command format is:
-            # login username
+            # login 
+            # 
+            # username
+            # <public key>
             # Split the string using " " as the separator but only once.
-            login_parts = login_request.split(" ", 1)
+            login_parts = login_request.split("\n\n", 1)
 
             # A valid login command must contain: login <username>
             if len(login_parts) != 2:
@@ -244,12 +276,18 @@ def handle_client(control_connection_socket, client_control_address):
                 continue
 
             command = login_parts[0]
-            requested_username = login_parts[1].strip()
+            # detect missing separator or failure for any components of expected message
+            requested_username, separator, client_public_key_pem = login_parts[1].split("\n", 1)
+            requested_username = requested_username.strip() # removes any whitespace around the username
 
             # The command must be "login", and username cannot be empty.
-            if command != "login" or requested_username == "":
+            # There must be a newline separating the username from the public key and
+            # the client public key cannot be missing or blank
+            if command != "login" or requested_username == "" or separator == "" or client_public_key_pem.strip() == "":
                 data_connection_socket.sendall("500\n\n".encode())
                 continue
+            # Converts the PEM text back into bytes to reconstruct the actual cryptographic public key object.     
+            client_public_key = serialization.load_pem_public_key(client_public_key_pem.encode())    
 
             # ------------------------------------------------------------------
             # VALIDATE USERNAME UNIQUENESS
@@ -259,9 +297,9 @@ def handle_client(control_connection_socket, client_control_address):
                 # Username is already being used.
                     username_available = False
                 else:
-                    # Register the newly logged-in client.
+                    # Register the newly logged-in client with their public key
                     active_clients[requested_username] = {"control_socket": control_connection_socket,
-                        "data_socket": data_connection_socket}
+                        "data_socket": data_connection_socket, "public_key": client_public_key}
                     username_available = True
 
             # Username already exists.
