@@ -17,6 +17,14 @@ def decrypt_with_private_key(encrypted_message, private_key):
         decrypted_message += decrypted_chunk
     return decrypted_message
 
+def encrypt_with_public_key(message_bytes, public_key):
+    encrypted_message = b""
+    for start in range(0, len(message_bytes), RSA_PLAINTEXT_CHUNK_SIZE):
+        chunk = message_bytes[start:start + RSA_PLAINTEXT_CHUNK_SIZE]
+        encrypted_chunk = public_key.encrypt(chunk, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        encrypted_message += encrypted_chunk
+    return encrypted_message
+
 # getting server messages 
 def receive_server_messages(data_connection_socket):
 
@@ -28,6 +36,9 @@ def receive_server_messages(data_connection_socket):
 
             if not response_bytes:
                 break
+
+            response_bytes = decrypt_with_private_key(response_bytes, client_private_key)
+            print("Received encrypted message")
 
             # joining noti           
             if response_bytes.startswith(b"200\n\njoin\n"):
@@ -352,7 +363,9 @@ try:
 
             command_complete_event.clear()
 
-            control_connection_socket.sendall(user_input.encode())
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+            
+            control_connection_socket.sendall(encrypted_command)
 
             command_complete_event.wait()
             continue
@@ -381,7 +394,9 @@ try:
 
             command_complete_event.clear()
 
-            control_connection_socket.sendall(user_input.encode())
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+            
+            control_connection_socket.sendall(encrypted_command)
             command_complete_event.wait()
             continue
 
@@ -409,10 +424,14 @@ try:
             pending_filename = filename
     
             command_complete_event.clear()
+
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
             
-            control_connection_socket.sendall(user_input.encode())
+            control_connection_socket.sendall(encrypted_command)
+
+            encrypted_file_data = encrypt_with_public_key(file_data, server_public_key)
     
-            data_connection_socket.sendall(file_data)
+            data_connection_socket.sendall(encrypted_file_data)
     
             command_complete_event.wait()
     
