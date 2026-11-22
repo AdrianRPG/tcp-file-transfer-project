@@ -316,17 +316,21 @@ try:
 
         login_response_bytes = b""
         while len(login_response_bytes) < RSA_CIPHERTEXT_BLOCK_SIZE:
-            response_piece = data_connection_socket.recv(RSA_CIPHERTEXT_BLOCK_SIZE - len(login_response_bytes))
+            response_piece = data_connection_socket.recv(RSA_CIPHERTEXT_BLOCK_SIZE)
             if not response_piece:
                 raise OSError("Server closed the data connection.")
             login_response_bytes += response_piece
+            if login_response_bytes == b"500\n\n":
+                break
 
         if not login_response_bytes:
             raise OSError("Server closed the data connection.")
         
-        login_response_plaintext = decrypt_with_private_key(login_response_bytes, client_private_key)
-        print("Received encrypted message")
-
+        if len(login_response_bytes) == RSA_CIPHERTEXT_BLOCK_SIZE:
+            login_response_plaintext = decrypt_with_private_key(login_response_bytes, client_private_key)
+            print("Received encrypted message")
+        else:
+            login_response_plaintext = login_response_bytes
         login_response = login_response_plaintext.decode()
 
         status_code = login_response.split("\n", 1)[0].strip()
