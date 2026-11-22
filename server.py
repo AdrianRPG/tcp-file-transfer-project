@@ -95,6 +95,21 @@ def decrypt_with_private_key(encrypted_message, private_key):
         decrypted_message += decrypted_chunk
     return decrypted_message
 
+def receive_complete_rsa_blocks(connection_socket):
+    encrypted_message = connection_socket.recv(4096)
+    if not encrypted_message:
+        return b""
+    while len(encrypted_message) % RSA_CIPHERTEXT_BLOCK_SIZE != 0:
+        bytes_needed = (
+            RSA_CIPHERTEXT_BLOCK_SIZE
+            - (len(encrypted_message) % RSA_CIPHERTEXT_BLOCK_SIZE)
+        )
+        piece = connection_socket.recv(bytes_needed)
+        if not piece:
+            return b""
+        encrypted_message += piece
+    return encrypted_message
+
 # ------------------------------------------------------------
 # CLEAN UP A CLIENT
 # ------------------------------------------------------------
@@ -297,7 +312,11 @@ def handle_client(control_connection_socket, client_control_address):
                 data_connection_socket.sendall("500\n\n".encode())
                 continue
             # Converts the PEM text back into bytes to reconstruct the actual cryptographic public key object.     
-            client_public_key = serialization.load_pem_public_key(client_public_key_pem.encode())    
+            try:
+                client_public_key = serialization.load_pem_public_key(client_public_key_pem.encode())
+            except (ValueError, TypeError):
+                data_connection_socket.sendall(b"500\n\n")
+                continue
 
             # ------------------------------------------------------------------
             # VALIDATE USERNAME UNIQUENESS
@@ -350,11 +369,9 @@ def handle_client(control_connection_socket, client_control_address):
         # --------------------------------------------------------
         while True:
             # Wait for the next encrypted command through the CONTROL connection.
-            request_bytes = b""
-            request_piece = control_connection_socket.recv(4096)
-            if not request_piece:
+            request_bytes = receive_complete_rsa_blocks(control_connection_socket)
+            if not request_bytes:
                 break
-            request_bytes += request_piece
             decrypted_request_bytes = decrypt_with_private_key(request_bytes, server_private_key)
             print("Received encrypted message")
             message_hash = hashlib.sha256(decrypted_request_bytes).digest()
