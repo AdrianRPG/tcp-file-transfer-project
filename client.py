@@ -38,8 +38,7 @@ def receive_server_messages(data_connection_socket):
                 break
 
             response_bytes = decrypt_with_private_key(response_bytes, client_private_key)
-            print("Received encrypted message")
-
+            
             # joining noti           
             if response_bytes.startswith(b"200\n\njoin\n"):
                 continue
@@ -47,6 +46,8 @@ def receive_server_messages(data_connection_socket):
             # logging out noti
             if response_bytes.startswith(b"200\n\nlogout\n"):
                 continue
+
+            print("Received encrypted message")
 
             # broadcast noti
             if response_bytes.startswith(b"200\n\nBroadcast\n"):
@@ -254,9 +255,14 @@ try:
     # sending connect command
     control_connection_socket.sendall(user_input.encode())
 
-    # getting connect command
-    connect_response_bytes = control_connection_socket.recv(1024)
-
+    connect_response_bytes = b""
+    while b"-----END PUBLIC KEY-----" not in connect_response_bytes:
+        response_piece = control_connection_socket.recv(1024)
+        if not response_piece:
+            break
+        connect_response_bytes += response_piece
+        if connect_response_bytes.startswith(b"500\n\n"):
+            break
     if not connect_response_bytes:
         raise OSError("Server closed the control connection.")
     
@@ -264,15 +270,16 @@ try:
 
     status_code, response_data = connect_response.split("\n\n",1)
     # split content of response data only at first newline --> port number & server public key
+
+    if status_code != "200":
+        print(f"{status_code} status code received.")
+        raise ConnectionError("CONNECT request failed.")
+    
     data_port_text, server_public_key_pem = response_data.split("\n", 1)
     # convert PEM text from server into the REAL RSA PUBLIC KEY from server
     server_public_key = serialization.load_pem_public_key(server_public_key_pem.encode())
     # client cannot encrypt with plain string so --> converts it back into bytes and then
     # reads those PEM bytes and reconstructs the actual RSA public key from the server. 
-
-    if status_code != "200":
-        print(f"{status_code} status code received.")
-        raise ConnectionError("CONNECT request failed.")
 
     server_data_port = int(data_port_text.strip())
     print("200 status code received. Starting data connection on port")
