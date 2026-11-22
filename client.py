@@ -319,7 +319,7 @@ try:
             response_piece = data_connection_socket.recv(RSA_CIPHERTEXT_BLOCK_SIZE - len(login_response_bytes))
             if not response_piece:
                 raise OSError("Server closed the data connection.")
-            login_reponse_bytes += response_piece
+            login_response_bytes += response_piece
 
         if not login_response_bytes:
             raise OSError("Server closed the data connection.")
