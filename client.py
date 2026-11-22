@@ -1,5 +1,13 @@
 import socket
 import threading 
+from cryptography.hazmat.primitives.asymmetric import rsa # imports rsa funcionality to create public/private key pair
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding # method for client to encrypt messages 
+# RSA should not encrypt raw data. Needs padding to safely prepare the plaintext before RSA encryption.
+from cryptography.hazmat.primitives import hashes # module for hash algorithm that OAEP (padding approach) will use.
+RSA_PLAINTEXT_CHUNK_SIZE = 190 # maximum amount of plaintext to place into each RSA-OAEP encryption operation
+RSA_CIPHERTEXT_BLOCK_SIZE = 256 # A 2048-bit RSA key produces an encrypted block of 2048 bits / 8 = 256 bytes
+# so every plaintext chunk of up to 190 bytes will become 256 encrypted bytes (ciphertext).
 
 # getting server messages 
 def receive_server_messages(data_connection_socket):
@@ -179,6 +187,10 @@ def receive_server_messages(data_connection_socket):
         pass
 
 print("Starting client...")
+client_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048) # stays only on the client - python cryptography object
+client_public_key = client_private_key.public_key() # can be shared with the server - python cryptography object
+# convert the public key into bytes
+client_public_key_bytes = client_public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
 
 control_connection_socket = None
 data_connection_socket = None
@@ -231,14 +243,19 @@ try:
     
     connect_response = connect_response_bytes.decode()
 
-
     status_code, response_data = connect_response.split("\n\n",1)
+    # split content of response data only at first newline --> port number & server public key
+    data_port_text, server_public_key_pem = response_data.split("\n", 1)
+    # convert PEM text from server into the REAL RSA PUBLIC KEY from server
+    server_public_key = serialization.load_pem_public_key(server_public_key_pem.encode())
+    # client cannot encrypt with plain string so --> converts it back into bytes and then
+    # reads those PEM bytes and reconstructs the actual RSA public key from the server. 
 
     if status_code != "200":
         print(f"{status_code} status code received.")
         raise ConnectionError("CONNECT request failed.")
 
-    server_data_port = int(response_data.strip())
+    server_data_port = int(data_port_text.strip())
     print("200 status code received. Starting data connection on port")
     print(server_data_port)
     
@@ -264,7 +281,19 @@ try:
             print("Invalid login command.")
             continue
 
-        control_connection_socket.sendall(user_input.encode())
+        # build the plaintext bytes login message
+        login_message = b"login\n\n" + username.encode() + b"\n" + client_public_key_bytes
+        encrypted_login = b"" # creates an empty bytes object to store RSA blocks
+        # walks through the complete "login_message" in steps of chunk size specified below.
+        for start in range(0, len(login_message), RSA_PLAINTEXT_CHUNK_SIZE):
+            chunk = login_message[start:start + RSA_PLAINTEXT_CHUNK_SIZE] # stores every 190 bytes
+            # takes the current plaintext chunk and encrypts using server public key
+            encrypted_chunk = server_public_key.encrypt(chunk, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))            
+            # OAEP padding prepares the data safely before RSA encryption, since RSA should not encrypt raw plaintext
+            # Applying OAEP hash and mask generation function.   
+            encrypted_login += encrypted_chunk # append the encrypted block to complete encrypted message
+        
+        control_connection_socket.sendall(encrypted_login)
 
         login_response_bytes = data_connection_socket.recv(1024)
 
