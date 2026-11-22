@@ -17,6 +17,22 @@ def decrypt_with_private_key(encrypted_message, private_key):
         decrypted_message += decrypted_chunk
     return decrypted_message
 
+def receive_complete_rsa_blocks(connection_socket):
+    encrypted_message = connection_socket.recv(4096)
+    if not encrypted_message:
+        return b""
+    while len(encrypted_message) % RSA_CIPHERTEXT_BLOCK_SIZE != 0:
+        bytes_needed = (
+            RSA_CIPHERTEXT_BLOCK_SIZE
+            - (len(encrypted_message) % RSA_CIPHERTEXT_BLOCK_SIZE)
+        )
+        piece = connection_socket.recv(bytes_needed)
+
+        if not piece:
+            return b""
+        encrypted_message += piece
+    return encrypted_message
+
 def encrypt_with_public_key(message_bytes, public_key):
     encrypted_message = b""
     for start in range(0, len(message_bytes), RSA_PLAINTEXT_CHUNK_SIZE):
@@ -32,7 +48,7 @@ def receive_server_messages(data_connection_socket):
     
     try:
         while True:
-            response_bytes = data_connection_socket.recv(4096)
+            response_bytes = receive_complete_rsa_blocks(data_connection_socket)
 
             if not response_bytes:
                 break
