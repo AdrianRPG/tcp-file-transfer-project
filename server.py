@@ -302,7 +302,7 @@ def handle_client(control_connection_socket, client_control_address):
 
             command = login_parts[0]
             # detect missing separator or failure for any components of expected message
-            requested_username, separator, client_public_key_pem = login_parts[1].partition("\n", 1)
+            requested_username, separator, client_public_key_pem = login_parts[1].partition("\n")
             requested_username = requested_username.strip() # removes any whitespace around the username
 
             # The command must be "login", and username cannot be empty.
@@ -375,6 +375,7 @@ def handle_client(control_connection_socket, client_control_address):
             decrypted_request_bytes = decrypt_with_private_key(request_bytes, server_private_key)
             print("Received encrypted message")
             message_hash = hashlib.sha256(decrypted_request_bytes).digest()
+            encrypted_message_hash = encrypt_with_public_key(message_hash, client_public_key)
             
             # Convert the received bytes into a string.
             request = decrypted_request_bytes.decode().strip()
@@ -536,7 +537,7 @@ def handle_client(control_connection_socket, client_control_address):
                 try:
                 
                     # Receive the file contents through the DATA connection.
-                    file_data = data_connection_socket.recv(4096)
+                    file_data = receive_complete_rsa_blocks(data_connection_socket)
 
                     file_data = decrypt_with_private_key(file_data, server_private_key)
     
