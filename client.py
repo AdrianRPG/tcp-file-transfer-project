@@ -32,7 +32,7 @@ def receive_server_messages(data_connection_socket):
     
     try:
         while True:
-            response_bytes = data_connection_socket.recv(1024)
+            response_bytes = data_connection_socket.recv(4096)
 
             if not response_bytes:
                 break
@@ -321,10 +321,11 @@ try:
                 raise OSError("Server closed the data connection.")
             login_reponse_bytes += response_piece
 
-        login_response_plaintext = decrypt_with_private_key(login_response_bytes, client_private_key)
-        
         if not login_response_bytes:
             raise OSError("Server closed the data connection.")
+        
+        login_response_plaintext = decrypt_with_private_key(login_response_bytes, client_private_key)
+        print("Received encrypted message")
 
         login_response = login_response_plaintext.decode()
 
@@ -446,8 +447,10 @@ try:
             pending_command = "list"
             pending_filename = None
             command_complete_event.clear()
-    
-            control_connection_socket.sendall(user_input.encode())
+
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+            
+            control_connection_socket.sendall(encrypted_command)
             command_complete_event.wait()
 
             continue
@@ -466,8 +469,10 @@ try:
             pending_command = "retr"
             pending_filename = filename
             command_complete_event.clear()
-    
-            control_connection_socket.sendall(user_input.encode())
+
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+            
+            control_connection_socket.sendall(encrypted_command)
     
             command_complete_event.wait()
     
@@ -489,8 +494,10 @@ try:
             pending_filename = filename
             
             command_complete_event.clear()
+
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
         
-            control_connection_socket.sendall(user_input.encode())
+            control_connection_socket.sendall(encrypted_command)
         
             command_complete_event.wait()
         
@@ -507,14 +514,17 @@ try:
 
             command_complete_event.clear()
 
-            control_connection_socket.sendall(user_input.encode())
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+
+            control_connection_socket.sendall(encrypted_command)
 
             command_complete_event.wait()
 
             break
         
         # other command
-        control_connection_socket.sendall(user_input.encode())
+        encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+        control_connection_socket.sendall(encrypted_command)
 
     # final server response
     receiver_thread.join()
