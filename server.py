@@ -525,6 +525,8 @@ def handle_client(control_connection_socket, client_control_address):
                 
                     # Receive the file contents through the DATA connection.
                     file_data = data_connection_socket.recv(4096)
+
+                    file_data = decrypt_with_private_key(file_data, server_private_key)
     
                     # Create the file in the current directory and write the received bytes (data) to it.
                     # open() means open or create the requested file using the name stored in filename.
