@@ -473,8 +473,6 @@ def handle_client(control_connection_socket, client_control_address):
                 target_recipient = private_parts[0].strip()
                 message = private_parts[1].strip()
 
-                print(f"Private message from {client_username} to {target_recipient}")
-
                 if target_recipient == "" or message == "":
                     private_error_response = "500\n\n"
                     encrypted_private_error_response = encrypt_with_public_key(private_error_response.encode(), client_public_key)
@@ -498,6 +496,7 @@ def handle_client(control_connection_socket, client_control_address):
                 # RECIPIENT EXISTS
                 # ------------------------------------------------
                 else:
+                    print(f"Private message from {client_username} to {target_recipient}")
                     # Get the data socket of the recipient.
                     target_data_socket = target_client["data_socket"]
 
