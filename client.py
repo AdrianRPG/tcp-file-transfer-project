@@ -398,6 +398,19 @@ try:
             command_complete_event.wait()
             continue
 
+        # broadcast command
+        if command == "broadcast":
+            if len(command_parts) != 2:
+                print("Invalid broadcast command.")
+                continue
+            message = command_parts[1].strip()
+            if message == "":
+                print("Invalid broadcast command.")
+                continue
+            encrypted_command = encrypt_with_public_key(user_input.encode(), server_public_key)
+            control_connection_socket.sendall(encrypted_command)
+            continue
+
         # private commands
         if command == "private":
             if len(command_parts) != 2:
